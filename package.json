@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@ai-sdk/openai": "^1.0.0",
-    "@selanet/sdk": "file:../sela-node-v2/client-sdk/crates/sela-node",
+    "@selanet/sdk": "file:./vendor/@selanet/sdk",
     "@tailwindcss/typography": "^0.5.19",
     "ai": "^4.0.0",
     "clsx": "^2.1.1",
