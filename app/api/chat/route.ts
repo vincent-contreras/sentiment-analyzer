@@ -5,6 +5,7 @@ import {
   sela_search,
   getActivityLog,
   clearActivityLog,
+  isPlatformEnabled,
 } from "@/lib/sela-adapter";
 import { buildAnalysisPrompt } from "@/lib/sentiment-engine";
 import type { SelaSearchResult } from "@/lib/sela-adapter";
@@ -50,7 +51,12 @@ export async function POST(req: Request) {
 
     const userQuery = typeof lastUserMessage.content === "string"
       ? lastUserMessage.content
-      : JSON.stringify(lastUserMessage.content);
+      : Array.isArray(lastUserMessage.content)
+        ? lastUserMessage.content
+            .filter((p): p is { type: "text"; text: string } => p.type === "text")
+            .map((p) => p.text)
+            .join(" ")
+        : String(lastUserMessage.content);
 
     // Check if this looks like a sentiment query vs general chat
     // The agent prompt instructs to ask "which product/service" first,
@@ -76,19 +82,33 @@ export async function POST(req: Request) {
     // ── Sela-powered analysis flow ─────────────────────────────
     clearActivityLog();
 
-    // Search Twitter and Reddit in parallel
-    const [twitterResults, redditResults] = await Promise.allSettled([
-      sela_search({ platform: "twitter", query: userQuery, max_results: 20 }),
-      sela_search({ platform: "reddit", query: userQuery, max_results: 20 }),
-    ]);
+    // Search enabled platforms in parallel
+    const searchPromises: Promise<SelaSearchResult>[] = [];
+    const platformOrder: ("twitter" | "reddit")[] = [];
 
-    const twitter: SelaSearchResult = twitterResults.status === "fulfilled"
-      ? twitterResults.value
-      : { platform: "twitter", items: [], authenticated: false, error: twitterResults.reason?.message || "Search failed" };
+    if (isPlatformEnabled("twitter")) {
+      platformOrder.push("twitter");
+      searchPromises.push(sela_search({ platform: "twitter", query: userQuery, max_results: 20 }));
+    }
+    if (isPlatformEnabled("reddit")) {
+      platformOrder.push("reddit");
+      searchPromises.push(sela_search({ platform: "reddit", query: userQuery, max_results: 20 }));
+    }
 
-    const reddit: SelaSearchResult = redditResults.status === "fulfilled"
-      ? redditResults.value
-      : { platform: "reddit", items: [], authenticated: false, error: redditResults.reason?.message || "Search failed" };
+    const results = await Promise.allSettled(searchPromises);
+
+    const resultMap: Record<string, SelaSearchResult> = {};
+    platformOrder.forEach((platform, i) => {
+      const r = results[i];
+      resultMap[platform] = r.status === "fulfilled"
+        ? r.value
+        : { platform, items: [], authenticated: false, error: r.reason?.message || "Search failed" };
+    });
+
+    const twitter: SelaSearchResult = resultMap.twitter
+      ?? { platform: "twitter", items: [], authenticated: false, error: "Platform disabled" };
+    const reddit: SelaSearchResult = resultMap.reddit
+      ?? { platform: "reddit", items: [], authenticated: false, error: "Platform disabled" };
 
     // Build the analysis prompt with collected data
     const analysisPrompt = buildAnalysisPrompt({
@@ -173,6 +193,16 @@ function streamSimpleResponse(
  */
 function isGreeting(text: string): boolean {
   const lower = text.toLowerCase().trim();
-  const greetings = ["hi", "hello", "hey", "sup", "yo", "howdy", "greetings", "good morning", "good afternoon", "good evening"];
-  return greetings.some((g) => lower === g || lower.startsWith(g + " ") || lower.startsWith(g + "!") || lower.startsWith(g + ","));
+  const exactGreetings = ["hi", "hello", "hey", "sup", "yo", "howdy", "greetings", "good morning", "good afternoon", "good evening"];
+  // Only match exact greetings or greetings followed by punctuation/filler
+  // e.g. "hey!" or "hello there" but NOT "Hey Siri" (a product query)
+  const greetingFollowUps = ["there", "bot", "agent", "buddy", "friend", "everyone", "all"];
+  if (exactGreetings.includes(lower)) return true;
+  for (const g of exactGreetings) {
+    if (lower.startsWith(g + "!") || lower.startsWith(g + ",") || lower.startsWith(g + ".")) return true;
+    for (const f of greetingFollowUps) {
+      if (lower === `${g} ${f}` || lower.startsWith(`${g} ${f}!`) || lower.startsWith(`${g} ${f},`)) return true;
+    }
+  }
+  return false;
 }

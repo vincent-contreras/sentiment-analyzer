@@ -60,6 +60,10 @@ RULES:
 }
 
 function formatPlatformData(name: string, result: SelaSearchResult): string {
+  if (result.error === "Platform disabled") {
+    return `**Status:** Platform not enabled for analysis.\n**Posts collected:** 0`;
+  }
+
   if (result.error) {
     return `**Status:** Failed to access — ${result.error}\n**Posts collected:** 0`;
   }

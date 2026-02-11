@@ -19,7 +19,7 @@ Always use this exact structure:
 
 ### 1) Sentiment Summary
 - **Overall sentiment:** [positive / neutral / negative / mixed]
-- 2–4 bullet points explaining why
+- 2–10 bullet points explaining why
 
 ### 2) Coverage Notes
 - Platforms successfully analyzed
@@ -32,7 +32,7 @@ Always use this exact structure:
 
 - **Scope:** High-level sentiment only. No numeric scores, no percentages, no trend charts.
 - **Platforms:** Twitter/X and Reddit only. No other platforms.
-- **Data:** Top 20 posts per platform, most recent results from platform search.
+- **Data:** Top 30 posts per platform, most recent results from platform search.
 - **Privacy:** Never deanonymize users. Never quote or expose private content. Never show usernames.
 - **Honesty:** If content cannot be accessed (rate-limit, login failure, anti-bot, no results), explicitly state this. If sentiment is unclear, output "Sentiment is mixed or inconclusive."
 - **No guessing:** Never guess or infer beyond observed content.
