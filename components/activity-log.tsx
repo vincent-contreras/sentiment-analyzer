@@ -1,7 +1,7 @@
 "use client";
 
 import { clsx } from "clsx";
-import { ActivityIcon, TwitterIcon, RedditIcon, XIcon, SearchIcon } from "./icons";
+import { ActivityIcon, TwitterIcon, XIcon, SearchIcon } from "./icons";
 import type { ActivityLogEntry } from "@/lib/types";
 
 interface ActivityLogProps {
@@ -14,8 +14,6 @@ function PlatformIcon({ platform }: { platform: ActivityLogEntry["platform"] }) 
   switch (platform) {
     case "twitter":
       return <TwitterIcon className="w-4 h-4" />;
-    case "reddit":
-      return <RedditIcon className="w-4 h-4" />;
     default:
       return <ActivityIcon className="w-4 h-4" />;
   }

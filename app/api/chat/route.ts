@@ -1,16 +1,14 @@
 import { openai } from "@ai-sdk/openai";
-import { streamText, type CoreMessage } from "ai";
+import { streamText, generateText, type CoreMessage } from "ai";
 import { getAgentDefinition } from "@/lib/agent";
 import {
   sela_search,
   getActivityLog,
   clearActivityLog,
-  isPlatformEnabled,
 } from "@/lib/sela-adapter";
 import { buildAnalysisPrompt } from "@/lib/sentiment-engine";
-import type { SelaSearchResult } from "@/lib/sela-adapter";
 
-export const maxDuration = 120; // Allow up to 2 minutes for browsing + analysis
+export const maxDuration = 120; // Allow up to 2 minutes for scraping + analysis
 
 /**
  * POST /api/chat
@@ -19,9 +17,10 @@ export const maxDuration = 120; // Allow up to 2 minutes for browsing + analysis
  * 1. Receive user message (product/service to analyze)
  * 2. Check if user is asking about a product (or just chatting)
  * 3. If analysis is needed:
- *    a. Search Twitter + Reddit in parallel via Sela
- *    b. Feed collected posts to OpenAI for sentiment classification
- *    c. Stream the structured response
+ *    a. Use LLM to infer the Twitter handle for the product
+ *    b. Scrape the Twitter profile via Sela Network API
+ *    c. Feed collected posts to OpenAI for sentiment classification
+ *    d. Stream the structured response
  * 4. Attach activity log in response header
  */
 export async function POST(req: Request) {
@@ -59,20 +58,15 @@ export async function POST(req: Request) {
         : String(lastUserMessage.content);
 
     // Check if this looks like a sentiment query vs general chat
-    // The agent prompt instructs to ask "which product/service" first,
-    // so on the first message the AI will ask. On subsequent messages,
-    // the user provides the product name — that's when we search.
     const isFirstMessage = coreMessages.filter((m) => m.role === "user").length === 1;
     const isShortQuery = userQuery.length < 150;
 
     // If user just greeted or it's the first exchange, let the LLM handle naturally
-    // The agent prompt will make it ask the right question
     if (isFirstMessage && isGreeting(userQuery)) {
       return streamSimpleResponse(modelId, agentDefinition, coreMessages);
     }
 
     // If there are previous messages and user provides a product/service name, do analysis
-    // Also trigger if first message is clearly a product query
     const shouldAnalyze = !isGreeting(userQuery) && isShortQuery;
 
     if (!shouldAnalyze) {
@@ -82,46 +76,27 @@ export async function POST(req: Request) {
     // ── Sela-powered analysis flow ─────────────────────────────
     clearActivityLog();
 
-    // Search enabled platforms in parallel
-    const searchPromises: Promise<SelaSearchResult>[] = [];
-    const platformOrder: ("twitter" | "reddit")[] = [];
+    // Step 1: Use LLM to infer the Twitter handle for the product
+    const profileUrl = await resolveTwitterProfileUrl(userQuery, modelId);
 
-    if (isPlatformEnabled("twitter")) {
-      platformOrder.push("twitter");
-      searchPromises.push(sela_search({ platform: "twitter", query: userQuery, max_results: 20 }));
-    }
-    if (isPlatformEnabled("reddit")) {
-      platformOrder.push("reddit");
-      searchPromises.push(sela_search({ platform: "reddit", query: userQuery, max_results: 20 }));
-    }
-
-    const results = await Promise.allSettled(searchPromises);
-
-    const resultMap: Record<string, SelaSearchResult> = {};
-    platformOrder.forEach((platform, i) => {
-      const r = results[i];
-      resultMap[platform] = r.status === "fulfilled"
-        ? r.value
-        : { platform, items: [], authenticated: false, error: r.reason?.message || "Search failed" };
+    // Step 2: Scrape the Twitter profile via Sela API
+    const twitterResults = await sela_search({
+      profileUrl,
+      query: userQuery,
+      max_results: 20,
     });
 
-    const twitter: SelaSearchResult = resultMap.twitter
-      ?? { platform: "twitter", items: [], authenticated: false, error: "Platform disabled" };
-    const reddit: SelaSearchResult = resultMap.reddit
-      ?? { platform: "reddit", items: [], authenticated: false, error: "Platform disabled" };
-
-    // Build the analysis prompt with collected data
+    // Step 3: Build the analysis prompt with collected data
     const analysisPrompt = buildAnalysisPrompt({
       query: userQuery,
-      twitterResults: twitter,
-      redditResults: reddit,
+      twitterResults,
     });
 
     // Prepare activity log for the response header
     const activityLog = getActivityLog();
     const activityLogHeader = JSON.stringify(activityLog);
 
-    // Stream the sentiment analysis from OpenAI
+    // Step 4: Stream the sentiment analysis from OpenAI
     const result = streamText({
       model: openai(modelId),
       system: agentDefinition,
@@ -171,7 +146,38 @@ export async function POST(req: Request) {
 }
 
 /**
- * Simple streaming response without Sela browsing — used for greetings,
+ * Use a quick LLM call to infer the Twitter/X handle for a product or service.
+ * Falls back to sanitizing the product name as a handle if generation fails.
+ */
+async function resolveTwitterProfileUrl(
+  productName: string,
+  modelId: string
+): Promise<string> {
+  try {
+    const { text } = await generateText({
+      model: openai(modelId),
+      prompt: `What is the official Twitter/X handle for "${productName}"? Reply with ONLY the handle (e.g. @cursor_ai), nothing else. If you're not sure, give your best guess.`,
+      maxTokens: 30,
+    });
+
+    const handle = text.trim().replace(/^@/, "").replace(/[^a-zA-Z0-9_]/g, "");
+    if (handle.length > 0 && handle.length <= 15) {
+      return `https://x.com/${handle}`;
+    }
+  } catch {
+    // Fall through to fallback
+  }
+
+  // Fallback: sanitize the product name as a handle
+  const fallbackHandle = productName
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, "")
+    .slice(0, 15);
+  return `https://x.com/${fallbackHandle}`;
+}
+
+/**
+ * Simple streaming response without Sela scraping — used for greetings,
  * clarification questions, and when the agent needs to ask for the product name.
  */
 function streamSimpleResponse(

@@ -9,7 +9,7 @@ export async function loadAgentDefinition(): Promise<string> {
     return content.trim();
   } catch (error) {
     console.error("Failed to load agent definition:", error);
-    return "You are a sentiment analysis assistant that analyzes user sentiment for products and services using Twitter and Reddit data.";
+    return "You are a sentiment analysis assistant that analyzes user sentiment for products and services using Twitter/X data via the Sela Network API.";
   }
 }
 

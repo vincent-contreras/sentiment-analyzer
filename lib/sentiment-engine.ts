@@ -12,27 +12,22 @@ import type { SelaSearchResult } from "./sela-adapter";
 export interface SentimentAnalysisInput {
   query: string;
   twitterResults: SelaSearchResult;
-  redditResults: SelaSearchResult;
 }
 
 /**
  * Build the user prompt that contains the collected data for OpenAI to analyze.
  */
 export function buildAnalysisPrompt(input: SentimentAnalysisInput): string {
-  const { query, twitterResults, redditResults } = input;
+  const { query, twitterResults } = input;
 
   const twitterSection = formatPlatformData("Twitter/X", twitterResults);
-  const redditSection = formatPlatformData("Reddit", redditResults);
 
   return `Analyze user sentiment for: "${query}"
 
 ## Collected Data
 
-### Twitter/X
+### Twitter/X Profile Posts and Replies
 ${twitterSection}
-
-### Reddit
-${redditSection}
 
 ## Instructions
 Based ONLY on the data above, provide a sentiment analysis following this EXACT structure:
@@ -55,15 +50,11 @@ RULES:
 - Do NOT quote individual users or expose usernames.
 - Do NOT invent or infer beyond what is observed.
 - If sentiment is unclear, state "Sentiment is mixed or inconclusive."
-- All content was accessed via authenticated Sela Network sessions — state this.
+- All content was accessed via the Sela Network API — state this.
 - Keep the response concise (no raw quotes, no charts, no tables).`;
 }
 
 function formatPlatformData(name: string, result: SelaSearchResult): string {
-  if (result.error === "Platform disabled") {
-    return `**Status:** Platform not enabled for analysis.\n**Posts collected:** 0`;
-  }
-
   if (result.error) {
     return `**Status:** Failed to access — ${result.error}\n**Posts collected:** 0`;
   }
@@ -74,16 +65,20 @@ function formatPlatformData(name: string, result: SelaSearchResult): string {
 
   const postSummaries = result.items.map((item, i) => {
     const content = item.fields.content || item.fields.text || item.fields.title || "";
-    const likes = item.fields.like_count || item.fields.score || "";
-    const author = item.fields.author_name || item.fields.subreddit || "";
+    const likes = item.fields.likesCount || item.fields.like_count || "";
+    const replies = item.fields.repliesCount || "";
+    const retweets = item.fields.retweetsCount || "";
 
     let summary = `${i + 1}. ${String(content).slice(0, 300)}`;
-    if (likes) summary += ` [engagement: ${likes}]`;
-    if (author) summary += ` [from: ${author}]`;
+    const engagementParts: string[] = [];
+    if (likes) engagementParts.push(`${likes} likes`);
+    if (retweets) engagementParts.push(`${retweets} retweets`);
+    if (replies) engagementParts.push(`${replies} replies`);
+    if (engagementParts.length > 0) summary += ` [${engagementParts.join(", ")}]`;
     return summary;
   });
 
-  return `**Status:** Accessed via authenticated session (${result.authenticated ? "logged in" : "anonymous"})
+  return `**Status:** Accessed via Sela Network API (${result.authenticated ? "authenticated" : "anonymous"})
 **Posts collected:** ${result.items.length}
 
 ${postSummaries.join("\n")}`;

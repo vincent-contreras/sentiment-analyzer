@@ -45,7 +45,7 @@ export function ChatMessages({ messages, isLoading, status }: ChatMessagesProps)
           </h2>
           <p className="text-gray-600 dark:text-gray-400">
             I analyze user sentiment for products and services by reading
-            Twitter/X and Reddit posts via authenticated Sela Network sessions.
+            Twitter/X posts via the Sela Network API.
           </p>
           <div className="mt-6 space-y-2 text-sm text-gray-500 dark:text-gray-500">
             <p>Try asking:</p>

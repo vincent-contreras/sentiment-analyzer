@@ -1,28 +1,19 @@
 /**
- * Sela Network adapter — wraps @selanet/sdk for sentiment analysis browsing.
+ * Sela Network adapter — calls the Sela REST API for Twitter profile scraping.
  *
  * Responsibilities:
- * - Singleton SelaClient lifecycle (create → start → discover → connect)
- * - sela_status(), sela_search(), sela_browse() operations
- * - Session reuse, timeout/error handling
+ * - POST to /api/rpc/scrapeUrl with TWITTER_PROFILE scrapeType
+ * - Parse API response into SelaContentItem[]
  * - Activity log collection for the UI
  */
 
-import { JsSelaClient as SelaClient } from "@selanet/sdk";
 import type { ActivityLogEntry } from "./types";
 import { v4 as uuidv4 } from "uuid";
 
 // ── Types ────────────────────────────────────────────────────────
 
-export interface SelaStatus {
-  connected: boolean;
-  agentPeerId: string | null;
-  lastError: string | null;
-  state: string;
-}
-
 export interface SelaSearchResult {
-  platform: "twitter" | "reddit";
+  platform: "twitter";
   items: SelaContentItem[];
   authenticated: boolean;
   error?: string;
@@ -34,41 +25,13 @@ export interface SelaContentItem {
   url?: string;
 }
 
-export interface SelaBrowseResult {
-  pageType: string;
-  content: string;
-  authenticated: boolean;
-  error?: string;
-}
+// ── Config ───────────────────────────────────────────────────────
 
-// ── Platform config ─────────────────────────────────────────────
+const SELA_API_BASE_URL =
+  process.env.SELA_API_BASE_URL || "https://api.selanetwork.io";
 
-/** Comma-separated list of enabled platforms. Defaults to "twitter". */
-const ENABLED_PLATFORMS = (process.env.ENABLED_PLATFORMS || "twitter")
-  .split(",")
-  .map((p) => p.trim().toLowerCase());
+// ── Activity log ─────────────────────────────────────────────────
 
-export function isPlatformEnabled(platform: "twitter" | "reddit"): boolean {
-  return ENABLED_PLATFORMS.includes(platform);
-}
-
-// ── Platform URL helpers ─────────────────────────────────────────
-
-const TWITTER_SEARCH_URL = "https://x.com/search?q=";
-const REDDIT_SEARCH_URL = "https://www.reddit.com/search/?q=";
-
-function buildSearchUrl(platform: "twitter" | "reddit", query: string): string {
-  const encoded = encodeURIComponent(query);
-  if (platform === "twitter") {
-    return `${TWITTER_SEARCH_URL}${encoded}&src=typed_query&f=top`;
-  }
-  return `${REDDIT_SEARCH_URL}${encoded}&sort=relevance&t=all`;
-}
-
-// ── Singleton adapter ────────────────────────────────────────────
-
-let client: InstanceType<typeof SelaClient> | null = null;
-let lastError: string | null = null;
 let activityLog: ActivityLogEntry[] = [];
 
 function log(
@@ -99,184 +62,84 @@ export function clearActivityLog(): void {
   activityLog = [];
 }
 
-// ── Initialization ───────────────────────────────────────────────
+// ── API call ─────────────────────────────────────────────────────
 
-let clientInitPromise: Promise<InstanceType<typeof SelaClient>> | null = null;
-
-async function ensureClient(): Promise<InstanceType<typeof SelaClient>> {
-  // Fast path: client already running
-  if (client) {
-    const state = await client.state;
-    if (state === "running") return client;
-
-    // If client exists but is not running, try to restart
-    if (state === "stopped" || state === "created") {
-      try {
-        await client.start();
-        log("info", "system", "Sela client restarted");
-        return client;
-      } catch (err) {
-        lastError = err instanceof Error ? err.message : String(err);
-        log("error", "system", `Failed to restart Sela client: ${lastError}`);
-        client = null;
-      }
-    }
-  }
-
-  // Prevent concurrent initialization — reuse in-flight promise
-  if (clientInitPromise) {
-    return clientInitPromise;
-  }
-
-  clientInitPromise = initializeClient();
-  try {
-    return await clientInitPromise;
-  } finally {
-    clientInitPromise = null;
-  }
-}
-
-async function initializeClient(): Promise<InstanceType<typeof SelaClient>> {
-  const apiKey = process.env.SELA_API_KEY;
-  if (!apiKey) {
-    throw new Error("SELA_API_KEY environment variable is not set");
-  }
-
-  try {
-    client = await SelaClient.withApiKey(apiKey);
-
-    client.on("connected", (event: { peerId?: string }) => {
-      log("info", "system", `Connected to agent: ${event.peerId || "unknown"}`);
-    });
-
-    client.on("error", (event: { message?: string }) => {
-      lastError = event.message || "Unknown error";
-      log("error", "system", `Sela error: ${lastError}`);
-    });
-
-    client.on("disconnected", () => {
-      log("info", "system", "Disconnected from agent");
-    });
-
-    await client.start();
-    log("info", "system", "Sela client started, connected to P2P network");
-
-    // Discover and connect to an agent
-    const agents = await client.discoverAgents("web", {
-      maxAgents: 5,
-      timeoutMs: 15000,
-    });
-
-    if (agents.length === 0) {
-      throw new Error("No agents with 'web' capability found on the network");
-    }
-
-    log("info", "system", `Discovered ${agents.length} agent(s)`);
-
-    await client.connectToFirstAvailable(agents, 10000);
-    log("info", "system", "Connected to first available agent");
-
-    lastError = null;
-    return client;
-  } catch (err) {
-    client = null;
-    lastError = err instanceof Error ? err.message : String(err);
-    log("error", "system", `Failed to initialize Sela: ${lastError}`);
-    throw err;
-  }
-}
-
-// ── Public API ───────────────────────────────────────────────────
-
-export async function sela_status(): Promise<SelaStatus> {
-  try {
-    if (!client) {
-      return {
-        connected: false,
-        agentPeerId: null,
-        lastError: lastError || "Client not initialized",
-        state: "stopped",
-      };
-    }
-
-    const state = await client.state;
-    const connected = await client.isConnected;
-    const agent = await client.connectedAgent();
-
-    return {
-      connected,
-      agentPeerId: agent?.peerId || null,
-      lastError,
-      state,
-    };
-  } catch (err) {
-    return {
-      connected: false,
-      agentPeerId: null,
-      lastError: err instanceof Error ? err.message : String(err),
-      state: "unknown",
-    };
-  }
-}
-
+/**
+ * Scrape a Twitter profile via the Sela Network REST API.
+ *
+ * @param profileUrl - Full Twitter/X profile URL (e.g. https://x.com/cursor_ai)
+ * @param query - The original user query (for logging)
+ * @param max_results - Max items to return (default 20)
+ */
 export async function sela_search(params: {
-  platform: "twitter" | "reddit";
+  profileUrl: string;
   query: string;
   max_results?: number;
 }): Promise<SelaSearchResult> {
-  const { platform, query, max_results = 20 } = params;
+  const { profileUrl, query, max_results = 20 } = params;
+
+  const apiKey = process.env.SELA_API_KEY;
+  if (!apiKey) {
+    log("error", "system", "SELA_API_KEY environment variable is not set");
+    return {
+      platform: "twitter",
+      items: [],
+      authenticated: false,
+      error: "SELA_API_KEY not configured",
+    };
+  }
 
   try {
-    const selaClient = await ensureClient();
-    const searchUrl = buildSearchUrl(platform, query);
+    log("search", "twitter", `Scraping Twitter profile for "${query}"`, profileUrl);
 
-    log("search", platform, `Searching for "${query}"`, searchUrl);
-
-    const response = await selaClient.browse(searchUrl, {
-      timeoutMs: 60000,
-      count: max_results,
-      parseOnly: true,
-      apiKey: "dev_bypass_token", // Bypasses TokenManager; agent-node accepts any token in API_DEV_MODE
+    const response = await fetch(`${SELA_API_BASE_URL}/api/rpc/scrapeUrl`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        url: profileUrl,
+        scrapeType: "TWITTER_PROFILE",
+      }),
     });
 
-    // Parse semantic content from the response
-    let items: SelaContentItem[] = [];
-    try {
-      const parsed = JSON.parse(response.page.content);
-      if (Array.isArray(parsed)) {
-        items = parsed.map((item: Record<string, unknown>) => ({
-          contentType: (item.content_type as string) || "post",
-          fields: (item.fields as Record<string, unknown>) || item,
-          url: (item.url as string) || undefined,
-        }));
-      }
-    } catch {
-      // If content is not JSON array, treat as single text block
-      items = [{
-        contentType: "raw",
-        fields: { content: response.page.content },
-      }];
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "Unknown error");
+      const errorMsg = `Sela API returned ${response.status}: ${errorText}`;
+      log("error", "twitter", errorMsg, profileUrl);
+      return {
+        platform: "twitter",
+        items: [],
+        authenticated: false,
+        error: errorMsg,
+      };
     }
+
+    const json = await response.json();
+    // API returns { success, data: { result: [...] } }
+    const data = (json.data || json) as Record<string, unknown>;
+    const items = parseTwitterProfileResult(data, max_results);
 
     log(
       "info",
-      platform,
+      "twitter",
       `Found ${items.length} results for "${query}"`,
-      searchUrl,
-      `Page type: ${response.page.pageType}`
+      profileUrl,
+      `API response status: ${response.status}`
     );
 
     return {
-      platform,
-      items: items.slice(0, max_results),
+      platform: "twitter",
+      items,
       authenticated: true,
     };
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
-    log("error", platform, `Search failed: ${errorMsg}`, undefined, query);
+    log("error", "twitter", `Scrape failed: ${errorMsg}`, profileUrl, query);
 
     return {
-      platform,
+      platform: "twitter",
       items: [],
       authenticated: false,
       error: errorMsg,
@@ -284,44 +147,58 @@ export async function sela_search(params: {
   }
 }
 
-export async function sela_browse(params: {
-  url: string;
-  session_id?: string;
-}): Promise<SelaBrowseResult> {
-  const { url } = params;
-  const platform = url.includes("x.com") || url.includes("twitter.com")
-    ? "twitter"
-    : url.includes("reddit.com")
-      ? "reddit"
-      : "system";
+// ── Response parser ──────────────────────────────────────────────
+
+/**
+ * Parse the Sela API response into SelaContentItem[].
+ *
+ * The API returns { result: { ... } } — the exact shape may vary,
+ * so we handle multiple formats defensively.
+ */
+function parseTwitterProfileResult(
+  data: Record<string, unknown>,
+  maxResults: number
+): SelaContentItem[] {
+  const items: SelaContentItem[] = [];
 
   try {
-    const selaClient = await ensureClient();
+    // The API response structure: { result: { data: [...] } } or { result: [...] }
+    const result = data.result as Record<string, unknown> | unknown[] | undefined;
+    if (!result) return items;
 
-    log("browse", platform as "twitter" | "reddit", `Browsing URL`, url);
+    let entries: unknown[];
+    if (Array.isArray(result)) {
+      entries = result;
+    } else if (Array.isArray(result.data)) {
+      entries = result.data;
+    } else if (Array.isArray(result.tweets)) {
+      entries = result.tweets;
+    } else if (Array.isArray(result.posts)) {
+      entries = result.posts;
+    } else if (Array.isArray(result.items)) {
+      entries = result.items;
+    } else {
+      // Single result object — wrap it
+      entries = [result];
+    }
 
-    const response = await selaClient.browse(url, {
-      timeoutMs: 60000,
-      parseOnly: true,
-      apiKey: "dev_bypass_token", // Bypasses TokenManager; agent-node accepts any token in API_DEV_MODE
-    });
-
-    log("info", platform as "twitter" | "reddit", `Page loaded: ${response.page.pageType}`, url);
-
-    return {
-      pageType: response.page.pageType,
-      content: response.page.content,
-      authenticated: true,
-    };
-  } catch (err) {
-    const errorMsg = err instanceof Error ? err.message : String(err);
-    log("error", platform as "twitter" | "reddit", `Browse failed: ${errorMsg}`, url);
-
-    return {
-      pageType: "error",
-      content: "",
-      authenticated: false,
-      error: errorMsg,
-    };
+    for (const entry of entries.slice(0, maxResults)) {
+      if (entry && typeof entry === "object") {
+        const record = entry as Record<string, unknown>;
+        // Build full tweet URL from relative tweetUrl field
+        const tweetUrl = record.tweetUrl
+          ? `https://x.com${record.tweetUrl}`
+          : (record.url as string) || undefined;
+        items.push({
+          contentType: "tweet",
+          fields: record,
+          url: tweetUrl,
+        });
+      }
+    }
+  } catch {
+    // If parsing fails completely, return empty
   }
+
+  return items;
 }

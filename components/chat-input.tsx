@@ -81,7 +81,7 @@ export function ChatInput({ onSubmit, isLoading, disabled }: ChatInputProps) {
         </div>
       </div>
       <p className="text-center text-xs text-gray-500 mt-2">
-        {isLoading ? "Fetching data from Twitter and Reddit..." : "Press Enter to send, Shift+Enter for new line"}
+        {isLoading ? "Fetching data from Twitter/X..." : "Press Enter to send, Shift+Enter for new line"}
       </p>
     </form>
   );
